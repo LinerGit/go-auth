@@ -1,0 +1,22 @@
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    queries: "./sql/queries"
+    schema: "./migrations"
+
+    gen:
+      go:
+        package: "db"
+        out: "./internal/repository/db"
+        sql_package: "pgx/v5"
+
+        overrides:
+          - db_type: "pg_catalog.int8"
+            go_type: "int64"
+
+          - db_type: "pg_catalog.timestamp"
+            go_type: "time.Time"
+
+          - db_type: "pg_catalog.timestamptz"
+            go_type: "time.Time"

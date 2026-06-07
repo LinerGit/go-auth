@@ -19,6 +19,7 @@ type Config struct {
 
 	AccessTTL  time.Duration `env:"ACCESS_TOKEN_TTL"`
 	RefreshTTL time.Duration `env:"REFRESH_TOKEN_TTL"`
+	BcryptCost int           `env:"BCRYPT_COST"`
 }
 
 func MustLoad() Config {
