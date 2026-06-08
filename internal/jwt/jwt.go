@@ -28,16 +28,19 @@ func New(
 	}
 }
 
+// FIX 3: added username parameter so chat service can read sender name from token claims
 func (s *JWTService) GenerateAccessToken(
 	userID int64,
+	username string,
 	role string,
 ) (string, error) {
 
 	now := time.Now()
 
 	claims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:   userID,
+		Username: username,
+		Role:     role,
 
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject: strconv.FormatInt(

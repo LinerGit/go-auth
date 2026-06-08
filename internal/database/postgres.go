@@ -11,8 +11,10 @@ import (
 
 func New(cfg config.Config) (*pgxpool.Pool, error) {
 
+	// FIX 5: added sslmode=disable — without it pgx attempts TLS negotiation which
+	// fails against a plain Postgres container and causes a connection error on startup
 	dsn := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s",
+		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		cfg.PostgresUser,
 		cfg.PostgresPass,
 		cfg.PostgresHost,

@@ -21,7 +21,11 @@ type AuthService struct {
 
 type PasswordService interface {
 	Hash(password string) (string, error)
-	Compare(hashedPassword string, password string) error
+
+	Compare(
+		hashedPassword string,
+		password string,
+	) error
 }
 
 func NewAuthService(
@@ -31,6 +35,7 @@ func NewAuthService(
 	password PasswordService,
 	refreshTTL time.Duration,
 ) *AuthService {
+
 	return &AuthService{
 		users:         users,
 		refreshTokens: refreshTokens,
@@ -40,16 +45,67 @@ func NewAuthService(
 	}
 }
 
+func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*AuthTokens, error) {
+	token, err := s.ValidateRefreshToken(ctx, rawRefreshToken)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrInvalidToken
+		}
+		if err.Error() == "refresh token expired" {
+			return nil, ErrInvalidToken
+		}
+		return nil, err
+	}
+
+	user, err := s.users.GetUserByID(ctx, token.UserID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrInvalidToken
+		}
+		return nil, err
+	}
+
+	if err := s.refreshTokens.DeleteByHash(ctx, s.jwt.HashRefreshToken(rawRefreshToken)); err != nil {
+		return nil, err
+	}
+
+	// FIX 3: pass username so it is embedded in the new access token
+	accessToken, err := s.jwt.GenerateAccessToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		return nil, err
+	}
+
+	newRefreshToken, err := s.jwt.GenerateRefreshToken()
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.SaveRefreshToken(ctx, user.ID, newRefreshToken, time.Now().Add(s.refreshTTL))
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthTokens{
+		AccessToken:  accessToken,
+		RefreshToken: newRefreshToken,
+	}, nil
+}
+
 func (s *AuthService) Register(
 	ctx context.Context,
 	username string,
 	password string,
 ) (*AuthTokens, error) {
 
-	_, err := s.users.GetUserByUsername(ctx, username)
+	_, err := s.users.GetUserByUsername(
+		ctx,
+		username,
+	)
+
 	if err == nil {
 		return nil, ErrUserAlreadyExists
 	}
+
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
@@ -59,29 +115,43 @@ func (s *AuthService) Register(
 		return nil, err
 	}
 
-	user, err := s.users.CreateUser(ctx, db.CreateUserParams{
-		Username:     username,
-		PasswordHash: passwordHash,
-		Role:         "USER",
-	})
+	user, err := s.users.CreateUser(
+		ctx,
+		db.CreateUserParams{
+			Username:     username,
+			PasswordHash: string(passwordHash),
+			Role:         "USER",
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	accessToken, err := s.jwt.GenerateAccessToken(user.ID, user.Role)
+	// FIX 3: pass username so it is embedded in the access token
+	accessToken, err := s.jwt.GenerateAccessToken(
+		user.ID,
+		user.Username,
+		user.Role,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	// fix: was ignoring error from GenerateRefreshToken
+	// FIX 2: error from GenerateRefreshToken was silently dropped before (overwritten by next err=)
 	refreshToken, err := s.jwt.GenerateRefreshToken()
 	if err != nil {
 		return nil, err
 	}
 
-	// fix: was calling SaveRefreshToken (which calls Create internally)
-	// AND then calling refreshTokens.Create again — double insert removed
-	if err = s.SaveRefreshToken(ctx, user.ID, refreshToken, time.Now().Add(s.refreshTTL)); err != nil {
+	// FIX 1: only call SaveRefreshToken — the duplicate refreshTokens.Create() block below this
+	// was removed. SaveRefreshToken already calls Create internally, so calling both caused a
+	// duplicate-key constraint violation on every Register.
+	if err = s.SaveRefreshToken(
+		ctx,
+		user.ID,
+		refreshToken,
+		time.Now().Add(s.refreshTTL),
+	); err != nil {
 		return nil, err
 	}
 
@@ -97,7 +167,10 @@ func (s *AuthService) Login(
 	password string,
 ) (*AuthTokens, error) {
 
-	user, err := s.users.GetUserByUsername(ctx, username)
+	user, err := s.users.GetUserByUsername(
+		ctx,
+		username,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrInvalidCredentials
@@ -105,23 +178,39 @@ func (s *AuthService) Login(
 		return nil, err
 	}
 
-	if err = s.password.Compare(user.PasswordHash, password); err != nil {
+	err = s.password.Compare(
+		user.PasswordHash,
+		password,
+	)
+	if err != nil {
 		return nil, ErrInvalidCredentials
 	}
 
-	accessToken, err := s.jwt.GenerateAccessToken(user.ID, user.Role)
+	// FIX 3: pass username so it is embedded in the access token
+	accessToken, err := s.jwt.GenerateAccessToken(
+		user.ID,
+		user.Username,
+		user.Role,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	// fix: was ignoring error from GenerateRefreshToken
+	// FIX 2: error from GenerateRefreshToken was silently dropped before (overwritten by next err=)
 	refreshToken, err := s.jwt.GenerateRefreshToken()
 	if err != nil {
 		return nil, err
 	}
 
-	// fix: same double insert bug as Register — removed
-	if err = s.SaveRefreshToken(ctx, user.ID, refreshToken, time.Now().Add(s.refreshTTL)); err != nil {
+	// FIX 1: only call SaveRefreshToken — the duplicate refreshTokens.Create() block below this
+	// was removed. SaveRefreshToken already calls Create internally, so calling both caused a
+	// duplicate-key constraint violation on every Login.
+	if err = s.SaveRefreshToken(
+		ctx,
+		user.ID,
+		refreshToken,
+		time.Now().Add(s.refreshTTL),
+	); err != nil {
 		return nil, err
 	}
 
@@ -131,53 +220,13 @@ func (s *AuthService) Login(
 	}, nil
 }
 
-// Refresh validates the old refresh token, rotates it, and returns a new token pair.
-func (s *AuthService) Refresh(
-	ctx context.Context,
-	rawRefreshToken string,
-) (*AuthTokens, error) {
-
-	storedToken, err := s.ValidateRefreshToken(ctx, rawRefreshToken)
-	if err != nil {
-		return nil, ErrInvalidToken
-	}
-
-	// fetch user to get role
-	user, err := s.users.GetUserByID(ctx, storedToken.UserID)
-	if err != nil {
-		return nil, err
-	}
-
-	// rotate: delete old token
-	if err = s.refreshTokens.DeleteByHash(ctx, storedToken.TokenHash); err != nil {
-		return nil, err
-	}
-
-	accessToken, err := s.jwt.GenerateAccessToken(user.ID, user.Role)
-	if err != nil {
-		return nil, err
-	}
-
-	newRefreshToken, err := s.jwt.GenerateRefreshToken()
-	if err != nil {
-		return nil, err
-	}
-
-	if err = s.SaveRefreshToken(ctx, user.ID, newRefreshToken, time.Now().Add(s.refreshTTL)); err != nil {
-		return nil, err
-	}
-
-	return &AuthTokens{
-		AccessToken:  accessToken,
-		RefreshToken: newRefreshToken,
-	}, nil
-}
-
 func (s *AuthService) Logout(
 	ctx context.Context,
 	rawRefreshToken string,
 ) error {
+
 	hash := s.jwt.HashRefreshToken(rawRefreshToken)
+
 	return s.refreshTokens.DeleteByHash(ctx, hash)
 }
 
@@ -188,11 +237,14 @@ func (s *AuthService) SaveRefreshToken(
 	expiresAt time.Time,
 ) error {
 	hash := s.jwt.HashRefreshToken(rawToken)
-	_, err := s.refreshTokens.Create(ctx, db.CreateRefreshTokenParams{
-		UserID:    userID,
-		TokenHash: hash,
-		ExpiresAt: expiresAt,
-	})
+	_, err := s.refreshTokens.Create(
+		ctx,
+		db.CreateRefreshTokenParams{
+			UserID:    userID,
+			TokenHash: hash,
+			ExpiresAt: expiresAt,
+		},
+	)
 	return err
 }
 
@@ -200,6 +252,7 @@ func (s *AuthService) ValidateRefreshToken(
 	ctx context.Context,
 	rawToken string,
 ) (db.RefreshToken, error) {
+
 	hash := s.jwt.HashRefreshToken(rawToken)
 
 	token, err := s.refreshTokens.GetByHash(ctx, hash)
@@ -208,7 +261,7 @@ func (s *AuthService) ValidateRefreshToken(
 	}
 
 	if time.Now().After(token.ExpiresAt) {
-		return db.RefreshToken{}, ErrInvalidToken
+		return db.RefreshToken{}, errors.New("refresh token expired")
 	}
 
 	return token, nil

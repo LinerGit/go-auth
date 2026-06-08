@@ -24,8 +24,10 @@ type UserRepository interface {
 }
 
 type JWTService interface {
+	// FIX 3: added username parameter so it gets embedded in the token
 	GenerateAccessToken(
 		userID int64,
+		username string,
 		role string,
 	) (string, error)
 

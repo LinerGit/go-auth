@@ -1,8 +1,10 @@
 package jwt
 
 type Service interface {
+	// FIX 3: added username parameter to match updated GenerateAccessToken signature
 	GenerateAccessToken(
 		userID int64,
+		username string,
 		role string,
 	) (string, error)
 
